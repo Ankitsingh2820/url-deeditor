@@ -1,0 +1,72 @@
+[project]
+name = "lightnote-deedit-backend"
+version = "0.1.0"
+description = "AI video de-editing & cloning backend (LightNoteAI assignment)"
+requires-python = ">=3.11,<3.14"
+
+# Block A only needs the service layer. Media/AI deps are optional extras so the
+# API can boot (and CI can run) without downloading torch/onnx wheels.
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.32",
+    "pydantic>=2.9",
+    "pydantic-settings>=2.6",
+    "sqlmodel>=0.0.22",
+    "python-multipart>=0.0.12",
+    "sse-starlette>=2.1",
+    "celery[redis]>=5.4",
+    "redis>=5.2",
+]
+
+[project.optional-dependencies]
+# Block B+ : download, probe, scene detection, frame sampling
+media = [
+    "yt-dlp>=2024.12.13",
+    "scenedetect>=0.6.5",   # 0.7 dropped the [opencv] extra; opencv is listed below
+    "opencv-python-headless>=4.10",
+    "numpy>=1.26",
+    "pillow>=10.4",
+]
+# Block C : OCR + fuzzy matching (required for text detection)
+# The 1.3.x/1.4.x line caps at Python <3.13, so the range stays wide enough to
+# resolve on 3.13 too (which lands on 1.2.3). The [quad, text, confidence]
+# result shape is stable across the 1.x series, and normalise_result() rejects
+# anything that does not match it rather than crashing.
+ocr = [
+    "rapidocr-onnxruntime>=1.2.3,<2",
+    "rapidfuzz>=3.10",
+]
+# Block H : better inpainting. Optional by design -- the removal stage detects
+# whether it is importable and degrades to the OpenCV tier when it is not.
+inpaint = [
+    "simple-lama-inpainting>=0.1.2",
+]
+# Blocks G+ : speech and vision-language models
+ai = [
+    "faster-whisper>=1.1",
+    "google-genai>=0.3",
+]
+dev = [
+    "pytest>=8.3",
+    "httpx>=0.27",
+    "ruff>=0.8",
+]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["app*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+# B008: Depends()/Query() in defaults is the FastAPI idiom, not a mutable-default bug.
+ignore = ["B008"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

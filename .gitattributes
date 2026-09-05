@@ -1,0 +1,16 @@
+# Normalise to LF in the repository and on checkout.
+# Not cosmetic: these sources are copied into Linux containers, where CRLF in a
+# Dockerfile RUN line or an nginx config is a runtime failure. There are no
+# Windows batch files here that would need CRLF.
+* text=auto eol=lf
+
+# Never touch binaries.
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.ico  binary
+*.mp4  binary
+*.mov  binary
+*.webm binary
+*.wav  binary
+*.onnx binary

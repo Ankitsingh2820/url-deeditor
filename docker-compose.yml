@@ -1,0 +1,52 @@
+# Local stack: frontend + api + worker + redis.
+# The api and the worker share one image and one storage volume; only the
+# command differs. nginx serves the built UI and proxies /api and /media to the
+# api service, so the whole app is one origin at http://localhost:5173.
+
+services:
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    ports: ["6379:6379"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  api:
+    build: ./backend
+    ports: ["8000:8000"]
+    environment: &backend_env
+      ENV: dev
+      QUEUE_MODE: celery
+      REDIS_URL: redis://redis:6379/0
+      STORAGE_DIR: /srv/storage
+      DATABASE_URL: sqlite:////srv/data/lightnote.db
+      AI_ENABLED: "${AI_ENABLED:-true}"
+      GEMINI_API_KEY: "${GEMINI_API_KEY:-}"
+      ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY:-}"
+    volumes:
+      - storage:/srv/storage
+      - data:/srv/data
+    depends_on:
+      redis: {condition: service_healthy}
+
+  worker:
+    build: ./backend
+    command: ["celery", "-A", "app.worker.celery_app:celery", "worker", "-l", "info", "--concurrency", "2"]
+    environment: *backend_env
+    volumes:
+      - storage:/srv/storage
+      - data:/srv/data
+    depends_on:
+      redis: {condition: service_healthy}
+
+  frontend:
+    build: ./frontend
+    ports: ["5173:80"]
+    depends_on: [api]
+
+volumes:
+  storage:
+  data:
