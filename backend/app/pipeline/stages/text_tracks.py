@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import cv2
 
+from app.config import settings
 from app.db.models import JobStatus
 from app.pipeline import geometry, tracking
 from app.pipeline.base import Stage
@@ -50,9 +51,15 @@ class TextTrackStage(Stage):
         kept = tracking.prune(tracks, sample_interval)
         ctx.log(f"{len(tracks)} raw tracks -> {len(kept)} after pruning")
 
+        # The transcript, when there is one, is what turns position guesswork
+        # into an actual caption/overlay decision.
+        transcript = (ctx.get("asr") or {}).get("segments", [])
+        if not transcript:
+            ctx.degrade("classification_without_speech")
+
         ctx.progress(0.5, "extracting style")
         entries = [
-            self._build(ctx, index, track, sample_interval, float(media["duration"]))
+            self._build(ctx, index, track, sample_interval, float(media["duration"]), transcript)
             for index, track in enumerate(
                 sorted(kept, key=lambda t: t.span(sample_interval)[0])
             )
@@ -66,7 +73,8 @@ class TextTrackStage(Stage):
         return {"tracks": entries, "count": len(entries), "by_kind": by_kind}
 
     def _build(self, ctx: JobContext, index: int, track: tracking.Track,
-               sample_interval: float, media_duration: float) -> dict:
+               sample_interval: float, media_duration: float,
+               transcript: list[dict]) -> dict:
         t_in, t_out = track.span(sample_interval)
         box = track.box
         box_dict = geometry.to_dict(box)
@@ -76,9 +84,17 @@ class TextTrackStage(Stage):
         style.font_px_norm = box_dict["h"]
         style.align = geometry.horizontal_align(box)
 
+        spoken = tracking.spoken_between(transcript, t_in, t_out)
+        kind, reason = tracking.classify(
+            box, t_out - t_in, media_duration, track.text, spoken,
+            settings.caption_speech_threshold,
+        )
+
         return {
             "id": f"tx_{index + 1:03d}",
-            "kind": tracking.classify(box, t_out - t_in, media_duration, track.text),
+            "kind": kind,
+            "kind_reason": reason,
+            "spoken_match": round(tracking.speech_similarity(track.text, spoken), 1),
             "text": track.text,
             "t_in": t_in,
             "t_out": t_out,
@@ -86,7 +102,7 @@ class TextTrackStage(Stage):
             "box": box_dict,
             "style": style.to_dict(),
             "confidence": track.confidence,
-            "source": "ocr",
+            "source": "ocr+asr" if transcript else "ocr",
             "samples": len(track.detections),
             "editable": True,
         }

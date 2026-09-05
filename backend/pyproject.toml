@@ -41,10 +41,12 @@ ocr = [
 inpaint = [
     "simple-lama-inpainting>=0.1.2",
 ]
-# Blocks G+ : speech and vision-language models
+# Block G : speech (local) and vision-language models (API, optional key).
+# Both providers are imported lazily and the pipeline degrades without them.
 ai = [
     "faster-whisper>=1.1",
-    "google-genai>=0.3",
+    "google-genai>=2.0",
+    "anthropic>=1.0",
 ]
 dev = [
     "pytest>=8.3",

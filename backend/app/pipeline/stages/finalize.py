@@ -1,9 +1,9 @@
 """Assemble project.json -- the editable deliverable.
 
-This stage is real from block A onwards: it collects whatever the upstream
-stages produced and serialises the contract documented in plan.md §5. As stages
-graduate from placeholder to real, they populate more of it; the schema and the
-consumers never change.
+It collects whatever the upstream stages produced and serialises the contract
+documented in plan.md §5. Stages that were skipped simply leave their section
+empty -- the schema and its consumers never change, so a job that ran without
+audio or without a VLM key still returns a valid, complete-shaped project.
 """
 
 from __future__ import annotations

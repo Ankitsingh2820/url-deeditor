@@ -70,6 +70,10 @@ export interface TextStyle {
 export interface TextTrack {
   id: string
   kind: TextKind
+  /** Why that kind was chosen: matches_speech | not_spoken | position_heuristic | ... */
+  kind_reason?: string
+  /** 0-100 fuzzy match between this text and what was spoken while it was up. */
+  spoken_match?: number
   text: string
   t_in: number
   t_out: number
@@ -86,6 +90,10 @@ export interface OverlayTrack {
   id: string
   kind: string
   label: string | null
+  /** The VLM judged this region to be part of the filmed scene, not a graphic. */
+  rejected?: boolean
+  vlm_confidence?: number
+  signals?: Record<string, number>
   t_in: number
   t_out: number
   scene_id: string | null

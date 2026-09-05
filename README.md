@@ -23,14 +23,15 @@ Full technical design, staged plan and rationale: **[plan.md](plan.md)**.
 | **D** | Mask timeline, tiered inpainting, clean video + per-scene clean clips | ✅ **done** |
 | **E** | React frontend: URL/upload input, live SSE status, scene timeline, original↔clean A/B | ✅ **done** |
 | **F** | Image / product pop-up detection (stability + transience + structure, per scene) | ✅ **done** |
-| G–I | Whisper + VLM semantics, LaMa inpainting, recompose/rebuild | ⏳ next |
+| **G** | Whisper ASR + speech-aligned caption classification; provider-agnostic VLM pass | ✅ **done** |
+| H–I | LaMa inpainting, recompose / rebuild from the edited project | ⏳ next |
 
 **Every capability the brief asks for now works end to end.** Open the UI, paste a URL or drop a
 file, watch the stages stream past, then explore the breakdown: a scene timeline with text and
 overlay lanes, an original↔de-edited A/B player with detection boxes drawn from the normalized
 coordinates, and a per-scene inspector. Scenes, captions, text overlays and image/product pop-ups
-are detected, isolated and removed. Only the speech/VLM semantic pass remains a placeholder, and it
-reports `*_not_implemented` in `diagnostics.degradations` rather than faking a result.
+are detected, isolated and removed, and the pipeline is complete end to end — there are no
+placeholder stages left.
 
 Actual output for a synthetic UGC clip (3 scenes, burned-in captions, a corner watermark):
 
@@ -134,6 +135,21 @@ React (Vite)  ──POST /jobs──►  FastAPI  ──enqueue──►  worker
 - **Style is measured off the glyph core.** Antialiasing blends text into background over a 1 px
   rim; eroding the glyph mask before sampling colour, and reading the outline from the band just
   beyond the rim, is what makes the recovered colour usable for re-rendering.
+- **Speech is what actually classifies a caption.** Position cannot: a hook line and a subtitle
+  both sit in the lower third of a UGC ad. Matching each OCR track against the words spoken in its
+  own time window answers the real question — *are the words on screen the words being said?* Text
+  that matches is a `caption` wherever it sits; text that is never spoken is an `overlay_text` even
+  when it sits exactly where a subtitle would. `kind_reason` records which rule fired, and the UI
+  shows it.
+- **The VLM is asked once per scene, not per frame or per candidate.** The keyframe and every
+  candidate crop for that scene go up in one request, capped at 12 scenes. Per-frame calls would be
+  ~900 requests; no calls at all loses every semantic. Output is constrained to a strict JSON
+  schema (`output_config.format` / `response_json_schema`), so there is no prose parsing.
+- **A rejected candidate is marked, not deleted.** When the model rules that a region is a poster on
+  the wall rather than a pasted graphic, it stays in `overlay_tracks` for inspection but is dropped
+  from the mask timeline — so a false positive stops being painted out of the footage.
+- **No key is a supported configuration.** The provider factory returns a no-op, the stage records
+  `vlm_unavailable`, and every CV result stands. Whisper is local and needs no key at all.
 - **Pop-up detection uses two signals that are mutually exclusive, not combined.** A pasted layer
   is nailed to the screen, so when the camera pans its temporal variance collapses while the
   world's does not. On a locked-off camera that tells you nothing, so the fallback counts *how many
@@ -174,6 +190,22 @@ React (Vite)  ──POST /jobs──►  FastAPI  ──enqueue──►  worker
   source resolution with no conversion bugs.
 
 ---
+
+## AI integration
+
+| Model | Where it runs | Key needed | What it contributes |
+|---|---|---|---|
+| PP-OCRv4 (RapidOCR / ONNX) | local, CPU | no | on-screen text detection + recognition |
+| faster-whisper (CTranslate2) | local, CPU | no | transcript → separates captions from graphics |
+| Gemini 2.5 Flash **or** Claude (`claude-opus-5`) | API | **optional** | scene descriptions; names and validates pop-ups |
+| LaMa (optional extra) | local | no | higher-quality inpainting |
+
+Set `GEMINI_API_KEY` (or `ANTHROPIC_API_KEY` with `VLM_PROVIDER=claude`) in `backend/.env` to enable
+the semantic pass. Without it everything still runs — the job records `vlm_unavailable` and keeps
+the computer-vision results.
+
+Both providers implement one interface (`app/ai/base.py`) and are constrained to the same JSON
+schema, so switching is a config change.
 
 ## Run it locally
 
@@ -297,3 +329,8 @@ Tracked in `plan.md §11`. Current build:
   plate on real footage but also fires on a synthetically flat background.
 - Scene detection handles cuts, not dissolves or whip transitions.
 - Only Latin script is enabled in the OCR model pack.
+- Without a VLM key, pop-ups are reported as `kind: "overlay"` with no label, and the false
+  positives in the table above are not filtered.
+- The first job on a fresh machine downloads the Whisper weights (~38 s measured, vs ~1 s once
+  cached). Workers warm the models at boot to keep that off the first request; the Docker image
+  should bake them in for a cold deploy.

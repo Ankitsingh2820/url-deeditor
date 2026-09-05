@@ -176,22 +176,58 @@ def prune(tracks: list[Track], sample_interval: float) -> list[Track]:
 # ------------------------------------------------------------- classification
 
 
-def classify(box: Box, duration: float, media_duration: float, text: str) -> str:
-    """Provisional kind for a text track.
+def spoken_between(segments: list[dict], t_in: float, t_out: float) -> str:
+    """Everything said while this text was on screen.
 
-    Position and lifetime only -- this is a heuristic, and a deliberately
-    shallow one. The real separation between a burned-in *caption* (a subtitle
-    of what is being said) and an *overlay_text* (a hook line or CTA that is
-    never spoken) comes from aligning the text against the ASR transcript in the
-    speech stage, which refines whatever we decide here.
+    Any transcript segment that overlaps the window counts -- speech rarely
+    starts and stops exactly on a caption boundary.
+    """
+    words = [
+        str(segment.get("text", ""))
+        for segment in segments
+        if float(segment.get("t_out", 0)) > t_in and float(segment.get("t_in", 0)) < t_out
+    ]
+    return " ".join(w.strip() for w in words if w.strip())
+
+
+def speech_similarity(text: str, spoken: str) -> float:
+    """How much the on-screen text looks like a transcript of the speech, 0-100.
+
+    `partial_ratio`, not `ratio`: a caption shows a fragment of a longer
+    sentence, so the right question is whether the text appears *within* what
+    was said, not whether the two strings are the same length.
+    """
+    if not text.strip() or not spoken.strip():
+        return 0.0
+    return fuzz.partial_ratio(text.strip().lower(), spoken.strip().lower())
+
+
+def classify(box: Box, duration: float, media_duration: float, text: str,
+             spoken: str = "", speech_threshold: float = 70.0) -> tuple[str, str]:
+    """Kind for a text track, plus the reason it was chosen.
+
+    When a transcript is available the decision is driven by *meaning* rather
+    than position: text that matches what is being said is a caption, wherever
+    it sits, and text that is never spoken is a graphic overlay even when it
+    sits exactly where a subtitle would. Position and lifetime remain the
+    fallback for silent video.
     """
     cx, cy = geometry.center(box)
     centered = 0.2 < cx < 0.8
     lower_third = cy > 0.62
     persistent = media_duration > 0 and duration >= 0.75 * media_duration
+    small = box[3] < 0.04
 
-    if persistent and (not centered or box[3] < 0.04):
-        return "watermark"
+    # A logo bug sits in a corner for the whole video and is never spoken;
+    # check it first so a chatty video cannot turn a watermark into a caption.
+    if persistent and (not centered or small):
+        return "watermark", "persistent_corner"
+
+    if spoken:
+        if speech_similarity(text, spoken) >= speech_threshold:
+            return "caption", "matches_speech"
+        return "overlay_text", "not_spoken"
+
     if lower_third and centered and duration <= 4.0 and len(text) <= 90:
-        return "caption"
-    return "overlay_text"
+        return "caption", "position_heuristic"
+    return "overlay_text", "position_heuristic"

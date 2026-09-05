@@ -123,7 +123,14 @@ class MaskStage(Stage):
 
         sources: list[dict] = []
         sources += (ctx.get("text_tracks") or {}).get("tracks", [])
-        sources += (ctx.get("overlays") or {}).get("tracks", [])  # block F
+        # A candidate the VLM ruled is part of the filmed scene rather than a
+        # pasted graphic stays in the output for inspection, but must not be
+        # painted out of the footage.
+        overlays = (ctx.get("overlays") or {}).get("tracks", [])
+        rejected = [t for t in overlays if t.get("rejected")]
+        sources += [t for t in overlays if not t.get("rejected")]
+        if rejected:
+            ctx.log(f"{len(rejected)} overlay candidate(s) rejected by the VLM, not masked")
 
         if not sources:
             ctx.degrade("nothing_to_mask")

@@ -37,7 +37,9 @@ celery.conf.update(
 
 @celery.on_after_configure.connect
 def _warmup(sender, **_kwargs):  # pragma: no cover - worker boot hook
-    """Create tables (and later: preload models) once per worker process."""
+    """Create tables and preload models once per worker process."""
     from app.db.session import init_db
+    from app.warmup import preload_in_background
 
     init_db()
+    preload_in_background()

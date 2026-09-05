@@ -139,8 +139,70 @@ def test_similarity_is_case_and_space_insensitive():
         ((0.02, 0.02, 0.18, 0.025), 5.9, "watermark"),    # corner, whole video
     ],
 )
-def test_classify(box, duration, expected):
-    assert tracking.classify(box, duration, 6.0, "some text") == expected
+def test_classify_falls_back_to_position_without_speech(box, duration, expected):
+    kind, reason = tracking.classify(box, duration, 6.0, "some text")
+    assert kind == expected
+    assert reason in {"position_heuristic", "persistent_corner"}
+
+
+# ------------------------------------------------- speech-aligned classification
+
+
+TRANSCRIPT = [
+    {"t_in": 0.5, "t_out": 2.4, "text": "this completely changed my skin"},
+    {"t_in": 2.6, "t_out": 4.0, "text": "I use it every single morning"},
+]
+
+
+def test_spoken_between_collects_overlapping_segments():
+    assert "changed my skin" in tracking.spoken_between(TRANSCRIPT, 1.0, 2.0)
+    # A window straddling both segments picks up both.
+    both = tracking.spoken_between(TRANSCRIPT, 2.0, 3.0)
+    assert "changed my skin" in both and "every single morning" in both
+    assert tracking.spoken_between(TRANSCRIPT, 10.0, 11.0) == ""
+    assert tracking.spoken_between([], 0.0, 1.0) == ""
+
+
+def test_speech_similarity_matches_a_fragment_of_the_sentence():
+    # A caption shows part of a longer utterance, so partial matching is required.
+    assert tracking.speech_similarity("changed my skin", TRANSCRIPT[0]["text"]) > 90
+    assert tracking.speech_similarity("50% OFF TODAY", TRANSCRIPT[0]["text"]) < 70
+    assert tracking.speech_similarity("", "anything") == 0.0
+    assert tracking.speech_similarity("anything", "") == 0.0
+
+
+def test_spoken_text_is_a_caption_wherever_it_sits():
+    """The point of the ASR pass: meaning beats position.
+
+    This box is in the *upper* third, where the position heuristic would call it
+    an overlay, but the words are being spoken - so it is a subtitle.
+    """
+    box = (0.15, 0.12, 0.70, 0.06)
+    spoken = tracking.spoken_between(TRANSCRIPT, 1.0, 2.2)
+
+    assert tracking.classify(box, 1.2, 6.0, "changed my skin", spoken) == (
+        "caption", "matches_speech",
+    )
+    assert tracking.classify(box, 1.2, 6.0, "changed my skin")[0] == "overlay_text"
+
+
+def test_unspoken_text_in_the_caption_position_is_an_overlay():
+    """The mirror case, and the one position alone always gets wrong."""
+    box = (0.15, 0.80, 0.70, 0.06)          # exactly where a subtitle sits
+    spoken = tracking.spoken_between(TRANSCRIPT, 1.0, 2.2)
+
+    assert tracking.classify(box, 1.2, 6.0, "LINK IN BIO", spoken) == (
+        "overlay_text", "not_spoken",
+    )
+    assert tracking.classify(box, 1.2, 6.0, "LINK IN BIO")[0] == "caption"
+
+
+def test_a_watermark_is_still_a_watermark_in_a_talkative_video():
+    box = (0.02, 0.02, 0.18, 0.025)
+    spoken = tracking.spoken_between(TRANSCRIPT, 0.0, 6.0)
+    assert tracking.classify(box, 5.9, 6.0, "@brandco", spoken) == (
+        "watermark", "persistent_corner",
+    )
 
 
 # --------------------------------------------------------------------- style

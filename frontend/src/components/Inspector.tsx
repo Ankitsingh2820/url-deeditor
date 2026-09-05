@@ -35,10 +35,24 @@ export function Inspector({ project, selection }: Props) {
   if (!overlay) return null
   return (
     <Panel title={`${overlay.id} · ${overlay.kind}`}>
+      {overlay.rejected && (
+        <p className="mb-2 rounded border border-amber-500/30 bg-amber-500/10 p-2 text-xs
+                      text-amber-300">
+          Ruled part of the filmed scene, not a composited graphic — detected, but not removed.
+        </p>
+      )}
       <Field label="label">{overlay.label ?? '—'}</Field>
       <Field label="time">
         {fmtTime(overlay.t_in)} → {fmtTime(overlay.t_out)}
       </Field>
+      {overlay.signals && (
+        <Field label="signals">
+          {Object.entries(overlay.signals)
+            .filter(([, v]) => v > 0)
+            .map(([k, v]) => `${k} ${v.toFixed(2)}`)
+            .join(' · ')}
+        </Field>
+      )}
       {overlay.asset && (
         <img
           src={assetUrl(project.job_id, overlay.asset)}
@@ -138,6 +152,21 @@ function TextDetail({ track }: { track: TextTrack }) {
         {(track.confidence * 100).toFixed(0)}% over {track.samples} sampled frame
         {track.samples === 1 ? '' : 's'}
       </Field>
+      {track.kind_reason && (
+        <Field label="why">
+          {track.kind_reason === 'matches_speech' ? (
+            <span className="text-emerald-300">
+              matches the speech ({track.spoken_match?.toFixed(0)}%) — it is a subtitle
+            </span>
+          ) : track.kind_reason === 'not_spoken' ? (
+            <span className="text-sky-300">
+              never spoken ({track.spoken_match?.toFixed(0)}%) — a graphic, not a caption
+            </span>
+          ) : (
+            <span className="text-neutral-500">{track.kind_reason.replace(/_/g, ' ')}</span>
+          )}
+        </Field>
+      )}
       <Field label="source">{track.source}</Field>
     </Panel>
   )

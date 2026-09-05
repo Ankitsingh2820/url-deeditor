@@ -64,7 +64,13 @@ class Settings(BaseSettings):
     gemini_api_key: str | None = None
     gemini_model: str = "gemini-2.5-flash"
     anthropic_api_key: str | None = None
+    anthropic_model: str = "claude-opus-5"
+    vlm_timeout_s: float = 30.0
+    #: cap on VLM calls per job -- one per scene, so this bounds cost and latency
+    vlm_max_scenes: int = 12
     whisper_model: str = "base"
+    #: fuzzy score at which on-screen text counts as a subtitle of the speech
+    caption_speech_threshold: float = 70.0
 
     @property
     def is_sqlite(self) -> bool:

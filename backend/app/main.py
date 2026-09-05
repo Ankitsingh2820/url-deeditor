@@ -30,6 +30,12 @@ async def lifespan(_app: FastAPI):
         "%s starting | env=%s queue=%s storage=%s",
         settings.app_name, settings.env, settings.queue_mode, settings.storage_dir,
     )
+    if settings.queue_mode == "thread":
+        # In thread mode this process *is* the worker, so warm the models here.
+        # Under celery the worker warms itself and the API stays lightweight.
+        from app.warmup import preload_in_background
+
+        preload_in_background()
     yield
     dispatch.shutdown()
 
