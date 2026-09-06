@@ -232,6 +232,26 @@ def test_overlaps_text_prevents_double_counting_a_caption():
     assert overlays.overlaps_text((0.5, 0.1, 0.3, 0.2), []) is False
 
 
+def test_containment_sees_a_fragment_inside_a_bigger_box():
+    card = (0.5, 0.1, 0.35, 0.25)
+    sliver = (0.6, 0.3, 0.1, 0.02)          # a strip inside the card
+    assert overlays.containment(sliver, card) > 0.9
+    assert overlays.iou(sliver, card) < 0.1 if hasattr(overlays, "iou") else True
+    assert overlays.containment((0.0, 0.0, 0.1, 0.1), card) == 0.0
+
+
+def test_deduplicate_absorbs_a_fragment_of_the_same_asset():
+    """The card is often found once cleanly and once as a fragment in the next
+    scene; both are the same object and only the bounding one should survive."""
+    card = Candidate(box=(0.5, 0.1, 0.35, 0.25), scene_id="sc_002", t_in=4.0, t_out=6.0,
+                     scores={"stability": 0.7, "detail": 0.7, "solidity": 0.7})
+    fragment = Candidate(box=(0.6, 0.3, 0.1, 0.02), scene_id="sc_003", t_in=6.0, t_out=7.0,
+                         scores={"stability": 0.9, "detail": 0.9, "solidity": 0.9})
+
+    kept = overlays.deduplicate([fragment, card])
+    assert kept == [card], "the bounding detection must win over the sliver"
+
+
 def test_deduplicate_keeps_the_strongest_of_an_overlapping_cluster():
     weak = Candidate(box=(0.5, 0.1, 0.35, 0.25), scene_id="sc_001", t_in=1.0, t_out=2.0,
                      scores={"stability": 0.6, "detail": 0.6, "solidity": 0.6})

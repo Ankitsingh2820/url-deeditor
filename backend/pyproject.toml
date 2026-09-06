@@ -53,6 +53,13 @@ dev = [
     "httpx>=0.27",
     "ruff>=0.8",
 ]
+# Everything the documented setup needs, as one name. Installing a subset works
+# but degrades silently -- without `ai`, for instance, speech transcription is
+# skipped and captions fall back to the position heuristic -- so the README
+# points at this and there is no partial-list to drift out of date.
+all = [
+    "lightnote-deedit-backend[media,ocr,ai]",
+]
 
 [build-system]
 requires = ["setuptools>=68"]

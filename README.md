@@ -209,29 +209,111 @@ schema, so switching is a config change.
 
 ## Run it locally
 
-Requires **ffmpeg** on `PATH`. Python **3.11** is recommended and is what the Docker image runs:
-several media/AI wheels cap out below 3.13 (`rapidocr-onnxruntime` resolves to 1.2.3 on 3.13 versus
-1.4.x on 3.11; `faster-whisper` and the inpainting models are stricter still — see `plan.md §3`).
-Everything here is verified on 3.13 with those older pins as well.
+Verified end to end from a clean clone on Windows (Python 3.13) — the exact steps below were
+executed and the test suite plus a full de-edit job were run from the resulting environment.
+
+### Prerequisites
+
+| Need | Check it | If missing |
+|---|---|---|
+| **ffmpeg** on `PATH` | `ffmpeg -version` | [ffmpeg.org/download](https://ffmpeg.org/download.html) — the one hard requirement |
+| **Python 3.11+** | `python --version` | 3.11 is what the Docker image runs and what the media/AI wheels prefer; 3.13 works (a few packages resolve to older pins — see `plan.md §3`) |
+| **Node 20+** | `node --version` | only for the UI |
+
+No API key is required. No GPU is required.
+
+### 1. Backend
 
 ```bash
 cd backend
 python -m venv .venv
-.venv/Scripts/python -m pip install -e ".[dev,media,ocr]"   # Linux/macOS: .venv/bin/python
-cp .env.example .env                                 # optional; defaults work
+
+# Windows
+.venv/Scripts/python -m pip install -e ".[dev,all]"
+# Linux / macOS
+.venv/bin/python -m pip install -e ".[dev,all]"
+
+cp .env.example .env          # optional — every setting has a working default
 .venv/Scripts/python -m uvicorn app.main:app --reload
 ```
 
-- API docs (OpenAPI): <http://localhost:8000/docs>
-- Readiness (db / storage / ffmpeg / broker): <http://localhost:8000/readyz>
+> Install `[dev,all]`, not a subset. `all` pulls media + OCR + speech/VLM together; a partial
+> install still starts, but silently skips transcription and falls back to the weaker
+> position-based caption heuristic. Takes about a minute.
 
-Then start the UI in a second terminal:
+### 2. Frontend
+
+In a second terminal:
 
 ```bash
 cd frontend
 npm install
-npm run dev          # http://localhost:5173 — proxies /api and /media to :8000
+npm run dev
 ```
+
+Open **<http://localhost:5173>**. Vite proxies `/api` and `/media` to port 8000, so the app is one
+origin — EventSource and video seeking behave exactly as they do behind the production nginx.
+
+### 3. De-edit something
+
+A sample clip ships with the repo — three scenes, three captions, a corner watermark and a product
+pop-up between 4.0 s and 7.0 s:
+
+```
+backend/samples/ugc_ad.mp4
+```
+
+Drop it on the page and press **De-edit**. Regenerate or vary it any time with
+`python scripts/make_sample.py samples/ugc_ad.mp4`. You can also paste a TikTok/Reels URL, but a
+local file is the reliable demo path — platforms block downloads unpredictably, and the API returns
+`E_DOWNLOAD_BLOCKED` with an "upload instead" hint when they do.
+
+Expected result on the sample (~30 s on a laptop CPU):
+
+```
+scenes        sc_001 0.0-3.0 · sc_002 3.0-6.0 · sc_003 6.0-9.0
+text tracks   caption   0.00-3.00  'this changed my skin'
+              watermark 0.00-9.00  '@glowlab'
+              caption   3.00-6.00  'three drops every morning'
+              caption   6.00-9.00  'link in bio'
+overlays      ov_001    4.17-5.83  IoU 0.74 against the ground-truth card
+outputs       clean/clean.mp4 + a clean clip per scene
+```
+
+### Verify the install
+
+<http://localhost:8000/readyz> reports exactly what is wired up:
+
+```json
+{ "ready": true, "queue_mode": "thread", "ai_enabled": true,
+  "vlm": { "provider": "gemini", "key_configured": false },
+  "checks": {
+    "database": { "ok": true },
+    "ffmpeg":   { "ok": true, "detail": "ffmpeg version 8.1 ..." },
+    "models":   { "ok": true,
+                  "detail": "available: ocr, asr, vlm_gemini, vlm_claude | not installed: inpaint_lama" } } }
+```
+
+`models.detail` is the quickest way to see whether your install is complete.
+API docs (OpenAPI): <http://localhost:8000/docs>.
+
+### Optional: enable the semantic pass
+
+Everything above runs without a key. Adding one lets the VLM name pop-ups
+(`overlay` → `product_popup: "serum bottle"`) and reject false positives. In `backend/.env`:
+
+```ini
+GEMINI_API_KEY=...                 # aistudio.google.com/apikey
+# or
+VLM_PROVIDER=claude
+ANTHROPIC_API_KEY=...
+```
+
+Without a key the job records `vlm_unavailable` in `diagnostics.degradations` and keeps the
+computer-vision results — nothing fails.
+
+Higher-quality inpainting is also opt-in: `pip install -e ".[inpaint]"` adds LaMa, and
+`removal_method: auto` picks it up automatically.
 
 ### With Docker (frontend + api + worker + redis)
 
@@ -240,13 +322,27 @@ docker compose up --build      # whole app on http://localhost:5173
 ```
 
 nginx serves the built bundle and proxies `/api` and `/media` to the API container, so the app is
-one origin — no CORS, and SSE and video Range requests pass through unbuffered.
+one origin — no CORS, and SSE and video Range requests pass through unbuffered. This is the path
+that runs Celery + Redis rather than the in-process thread pool.
 
 ### Tests
 
 ```bash
-cd backend && .venv/Scripts/python -m pytest -q
+cd backend && .venv/Scripts/python -m pytest -q      # 152 tests, ~35 s
 ```
+
+They build their own fixture videos with ffmpeg and need no network.
+
+### Troubleshooting
+
+| Symptom | Cause / fix |
+|---|---|
+| `/readyz` says `ffmpeg: not on PATH` | Install ffmpeg; everything downstream depends on it |
+| First job takes ~40 s longer than later ones | One-time Whisper weight download (~38 s measured, ~1 s once cached). Workers warm models at boot; just run one job first |
+| `models` shows `asr` not installed | You installed a subset — re-run with `.[dev,all]` |
+| `E_DOWNLOAD_BLOCKED` on a URL | The platform refused (login wall / region). Use the upload path |
+| Port 8000 or 5173 already in use | `uvicorn --port 8001`, and set `VITE_API_TARGET=http://127.0.0.1:8001` for the UI |
+| `Connection refused` at 127.0.0.1:5173 | Vite binds all interfaces here deliberately; if you changed that, use `localhost` |
 
 ---
 

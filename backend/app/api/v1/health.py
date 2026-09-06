@@ -50,6 +50,35 @@ def _check_ffmpeg() -> tuple[bool, str]:
         return False, f"{type(exc).__name__}: {exc}"
 
 
+def _check_models() -> tuple[bool, str]:
+    """Report which optional model layers are importable.
+
+    Not a readiness failure -- the pipeline degrades without them -- but the
+    fastest way for someone who just set the project up to see whether their
+    install is complete.
+    """
+    layers = {
+        "ocr": "rapidocr_onnxruntime",
+        "asr": "faster_whisper",
+        "vlm_gemini": "google.genai",
+        "vlm_claude": "anthropic",
+        "inpaint_lama": "simple_lama_inpainting",
+    }
+    present, missing = [], []
+    for label, module in layers.items():
+        try:
+            __import__(module)
+            present.append(label)
+        except ImportError:
+            missing.append(label)
+
+    detail = f"available: {', '.join(present) or 'none'}"
+    if missing:
+        detail += f" | not installed: {', '.join(missing)}"
+    # OCR is the one the core de-edit genuinely needs.
+    return "ocr" in present, detail
+
+
 def _check_broker() -> tuple[bool, str]:
     if settings.queue_mode != "celery":
         return True, "thread pool (no broker required)"
@@ -74,11 +103,17 @@ def readyz(response: Response) -> dict:
         "storage": _check_storage(),
         "ffmpeg": _check_ffmpeg(),
         "broker": _check_broker(),
+        "models": _check_models(),
     }
     ready = all(ok for ok, _ in checks.values())
     response.status_code = 200 if ready else 503
     return {
         "ready": ready,
         "queue_mode": settings.queue_mode,
+        "ai_enabled": settings.ai_enabled,
+        "vlm": {
+            "provider": settings.vlm_provider,
+            "key_configured": bool(settings.gemini_api_key or settings.anthropic_api_key),
+        },
         "checks": {name: {"ok": ok, "detail": detail} for name, (ok, detail) in checks.items()},
     }

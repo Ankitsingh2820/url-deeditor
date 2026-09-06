@@ -38,7 +38,10 @@ def test_healthz(client):
 
 def test_readyz_reports_checks(client):
     body = client.get("/readyz").json()
-    assert set(body["checks"]) == {"database", "storage", "ffmpeg", "broker"}
+    assert set(body["checks"]) == {"database", "storage", "ffmpeg", "broker", "models"}
+    # The models row is what tells someone whether their install is complete.
+    assert "available:" in body["checks"]["models"]["detail"]
+    assert "provider" in body["vlm"]
 
 
 def test_upload_runs_the_pipeline(client, fixture_bytes):

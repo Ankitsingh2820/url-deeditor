@@ -84,6 +84,8 @@ WINDOW_STRIDE = 2
 MIN_SOLIDITY = 0.35
 #: an overlay has duration: seen in one sampled frame only, it is noise
 MIN_PRESENT_SAMPLES = 2
+#: fraction of the smaller box inside a larger one that makes it a duplicate
+CONTAINMENT_THRESHOLD = 0.6
 
 
 @dataclass
@@ -179,10 +181,28 @@ def structure_mask(frame: np.ndarray, dilate: int = STRUCTURE_DILATE) -> np.ndar
     return cv2.dilate(edge_map(frame), element, iterations=1)
 
 
+def fill_holes(mask: np.ndarray) -> np.ndarray:
+    """Fill enclosed holes, so a bordered card becomes a solid block.
+
+    A product card is mostly flat, so intersecting with edges leaves only its
+    border -- a ring. A ring's bounding box is the card, but its *solidity* is
+    near zero, so the shape filter throws the detection away. Flood-filling from
+    the frame edge and inverting recovers everything the border encloses, which
+    is what the object actually is.
+    """
+    height, width = mask.shape[:2]
+    flood = mask.copy()
+    # floodFill needs a mask 2px larger than the image on each axis.
+    scratch = np.zeros((height + 2, width + 2), np.uint8)
+    cv2.floodFill(flood, scratch, (0, 0), 255)
+    return mask | cv2.bitwise_not(flood)
+
+
 def solidify(mask: np.ndarray, kernel: int = SOLIDIFY_KERNEL) -> np.ndarray:
-    """Fill the interior of a bordered asset whose middle carries no edges."""
+    """Close gaps in an asset's outline, then fill what the outline encloses."""
     element = cv2.getStructuringElement(cv2.MORPH_RECT, (kernel, kernel))
-    return cv2.morphologyEx(mask, cv2.MORPH_CLOSE, element, iterations=1)
+    closed = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, element, iterations=1)
+    return fill_holes(closed)
 
 
 def windows(count: int, size: int = WINDOW_SIZE, stride: int = WINDOW_STRIDE) -> list[range]:
@@ -334,11 +354,38 @@ def overlaps_text(box: Box, text_boxes: list[Box], threshold: float = TEXT_OVERL
     return any(geometry.iou(box, other) >= threshold for other in text_boxes)
 
 
-def deduplicate(candidates: list[Candidate], iou_threshold: float = 0.4) -> list[Candidate]:
-    """Greedy NMS: keep the strongest candidate of each overlapping cluster."""
+def containment(a: Box, b: Box) -> float:
+    """Intersection over the *smaller* box's area.
+
+    IoU alone cannot see that a small fragment sits inside a large detection --
+    a sliver overlapping a card scores near zero against it while being entirely
+    part of the same object. This ratio does.
+    """
+    ax0, ay0, ax1, ay1 = a[0], a[1], a[0] + a[2], a[1] + a[3]
+    bx0, by0, bx1, by1 = b[0], b[1], b[0] + b[2], b[1] + b[3]
+    ix = max(0.0, min(ax1, bx1) - max(ax0, bx0))
+    iy = max(0.0, min(ay1, by1) - max(ay0, by0))
+    intersection = ix * iy
+    smaller = min(geometry.area(a), geometry.area(b))
+    return intersection / smaller if smaller > 0 else 0.0
+
+
+def deduplicate(candidates: list[Candidate], iou_threshold: float = 0.4,
+                containment_threshold: float = CONTAINMENT_THRESHOLD) -> list[Candidate]:
+    """Greedy NMS over overlap *and* containment.
+
+    The same asset is often found twice -- once cleanly, and once as a fragment
+    picked up from a neighbouring scene or window. Suppressing on containment as
+    well as IoU collapses those into the one detection that actually bounds it.
+    """
     kept: list[Candidate] = []
-    for candidate in sorted(candidates, key=lambda c: c.score, reverse=True):
-        if any(geometry.iou(candidate.box, other.box) >= iou_threshold for other in kept):
-            continue
-        kept.append(candidate)
+    for candidate in sorted(candidates, key=lambda c: geometry.area(c.box) * c.score,
+                            reverse=True):
+        duplicate = any(
+            geometry.iou(candidate.box, other.box) >= iou_threshold
+            or containment(candidate.box, other.box) >= containment_threshold
+            for other in kept
+        )
+        if not duplicate:
+            kept.append(candidate)
     return kept
