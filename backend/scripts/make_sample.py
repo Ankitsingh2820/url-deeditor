@@ -13,8 +13,14 @@ of everything the pipeline looks for --
     * a persistent corner watermark
     * a product card that appears mid-shot and leaves again
 
--- so a single run exercises scene detection, OCR, text tracking, pop-up
-detection, masking and inpainting.
+-- and, where a speech synthesiser is available, a voice track that *says* the
+captions. That last part matters: it is what lets the pipeline demonstrate
+classifying text by meaning (the words on screen match the words spoken, so they
+are subtitles) rather than by position. Without audio the same captions fall back
+to the position heuristic.
+
+So a single run exercises scene detection, OCR, speech transcription, text
+classification, pop-up detection, masking and inpainting.
 
 Frames are drawn with OpenCV rather than ffmpeg's drawtext filter so the script
 does not depend on a font being installed at a known path.
@@ -91,7 +97,70 @@ def _draw_caption(frame: np.ndarray, text: str) -> None:
                 thickness, cv2.LINE_AA)
 
 
-def render(destination: Path, *, seed: int = 5) -> Path:
+def _narrate(text: str, destination: Path) -> bool:
+    """Render one line to a WAV with the OS speech synthesiser.
+
+    Windows SAPI via PowerShell -- no extra dependency, and the sample is a
+    developer convenience rather than a shipped asset. Returns False on any
+    platform or machine without it, and the caller falls back to a tone.
+    """
+    if sys.platform != "win32":
+        return False
+    script = (
+        "Add-Type -AssemblyName System.Speech;"
+        "$s = New-Object System.Speech.Synthesis.SpeechSynthesizer;"
+        "$s.Rate = -1;"
+        f"$s.SetOutputToWaveFile('{destination}');"
+        f"$s.Speak('{text}');"
+        "$s.Dispose()"
+    )
+    try:
+        result = subprocess.run(
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
+            capture_output=True, text=True, timeout=60, check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return result.returncode == 0 and destination.exists() and destination.stat().st_size > 1000
+
+
+def _mux_audio(video: Path, voices: list[Path | None], destination: Path) -> bool:
+    """Lay each spoken line at the start of the scene whose caption it is."""
+    tracks = [(i, p) for i, p in enumerate(voices) if p is not None]
+    if not tracks:
+        return False
+
+    args = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", str(video)]
+    for _, path in tracks:
+        args += ["-i", str(path)]
+
+    parts, labels = [], []
+    for slot, (scene, _path) in enumerate(tracks, start=1):
+        delay = int(scene * SCENE_SECONDS * 1000)
+        parts.append(f"[{slot}:a]adelay={delay}|{delay}[a{slot}]")
+        labels.append(f"[a{slot}]")
+    # apad to the clip's full length: a short audio track is legal, but padding
+    # keeps the sample simple to reason about.
+    duration = SCENE_SECONDS * SCENES
+    parts.append(
+        f"{''.join(labels)}amix=inputs={len(labels)}:normalize=0,"
+        f"apad,atrim=0:{duration}[a]"
+    )
+
+    args += [
+        "-filter_complex", ";".join(parts),
+        "-map", "0:v", "-map", "[a]",
+        "-c:v", "copy", "-c:a", "aac", "-b:a", "96k",
+        "-movflags", "+faststart", str(destination),
+    ]
+    result = subprocess.run(args, capture_output=True, text=True, check=False)
+    if result.returncode != 0:
+        print(f"  (audio mux failed, keeping the silent version: {result.stderr.strip()[:120]})")
+        return False
+    return True
+
+
+def render(destination: Path, *, seed: int = 5, narrate: bool = True) -> Path:
     if shutil.which("ffmpeg") is None:
         sys.exit("ffmpeg is not on PATH; install it first (see the README).")
 
@@ -120,17 +189,41 @@ def render(destination: Path, *, seed: int = 5) -> Path:
 
             cv2.imwrite(str(frames_dir / f"{index + 1:05d}.png"), frame)
 
+        silent = Path(workdir) / "silent.mp4"
         result = subprocess.run(
             ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
              "-framerate", str(FPS), "-i", str(frames_dir / "%05d.png"),
-             "-f", "lavfi", "-i", f"sine=frequency=320:duration={SCENE_SECONDS * SCENES}",
              "-c:v", "libx264", "-preset", "medium", "-crf", "20", "-pix_fmt", "yuv420p",
-             "-c:a", "aac", "-shortest", "-movflags", "+faststart", str(destination)],
+             "-movflags", "+faststart", str(silent)],
             capture_output=True, text=True, check=False,
         )
         if result.returncode != 0:
             # Show the encoder's own reason; a bare exit code is not actionable.
             sys.exit(f"ffmpeg failed ({result.returncode}):\n{result.stderr.strip()}")
+
+        voices: list[Path | None] = []
+        if narrate:
+            for index, line in enumerate(CAPTIONS):
+                wav = Path(workdir) / f"voice_{index}.wav"
+                voices.append(wav if _narrate(line, wav) else None)
+            spoken = sum(1 for v in voices if v)
+            print(f"  narrated {spoken}/{len(CAPTIONS)} captions")
+
+        if narrate and _mux_audio(silent, voices, destination):
+            return destination
+
+        # No speech synthesiser: fall back to a tone so the clip still has an
+        # audio stream, and say so -- the caption/overlay split will then come
+        # from position rather than from matching the transcript.
+        print("  note: no spoken track; captions will be classified by position,"
+              " not by matching the transcript.")
+        subprocess.run(
+            ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", str(silent),
+             "-f", "lavfi", "-i", f"sine=frequency=320:duration={SCENE_SECONDS * SCENES}",
+             "-c:v", "copy", "-c:a", "aac", "-shortest",
+             "-movflags", "+faststart", str(destination)],
+            capture_output=True, text=True, check=False,
+        )
     return destination
 
 
@@ -138,12 +231,14 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("output", nargs="?", default="samples/ugc_ad.mp4", type=Path)
     parser.add_argument("--seed", type=int, default=5)
+    parser.add_argument("--no-narration", action="store_true",
+                        help="skip the spoken track (captions then classify by position)")
     args = parser.parse_args()
 
-    path = render(args.output, seed=args.seed)
+    path = render(args.output, seed=args.seed, narrate=not args.no_narration)
     size = path.stat().st_size
     print(f"wrote {path}  ({size / 1e6:.1f} MB, {SCENE_SECONDS * SCENES}s, {WIDTH}x{HEIGHT})")
-    print("contains: 3 scenes, 3 captions, 1 watermark, 1 product pop-up (4.0-7.0s)")
+    print("contains: 3 scenes, 3 captions (spoken), 1 watermark, 1 product pop-up (4.0-7.0s)")
     print("\nUpload it at http://localhost:5173 and press De-edit.")
 
 

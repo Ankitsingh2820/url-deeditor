@@ -272,8 +272,13 @@ class FrameSink:
             "-s", f"{width}x{height}", "-r", f"{fps:.6f}", "-i", "-",
         ]
         if audio_from is not None:
+            # No -shortest: the frame stream is authoritative. Real files often
+            # carry an audio track a little shorter than the video, and with
+            # -shortest ffmpeg exits the moment audio ends and closes stdin --
+            # which surfaces as a BrokenPipeError while frames are still being
+            # written, failing the job on a perfectly valid input.
             args += ["-i", str(audio_from), "-map", "0:v:0", "-map", "1:a:0?",
-                     "-c:a", "aac", "-b:a", "128k", "-shortest"]
+                     "-c:a", "aac", "-b:a", "128k"]
         args += [
             "-c:v", "libx264", "-preset", "veryfast", "-crf", str(crf),
             "-pix_fmt", "yuv420p", "-movflags", "+faststart", str(dst),
@@ -284,7 +289,16 @@ class FrameSink:
 
     def write(self, frame) -> None:
         assert self._proc.stdin is not None
-        self._proc.stdin.write(frame.tobytes())
+        try:
+            self._proc.stdin.write(frame.tobytes())
+        except BrokenPipeError as exc:
+            # The encoder died early. Its stderr says why; a bare broken pipe
+            # does not.
+            _, stderr = self._proc.communicate(timeout=30)
+            tail = " | ".join((stderr or b"").decode("utf-8", "replace").strip().splitlines()[-3:])
+            raise FFmpegError(
+                f"encoder closed the stream while writing {self.dst.name}: {tail or exc}"
+            ) from exc
 
     def close(self, timeout: int = 300) -> None:
         if self._proc.stdin:

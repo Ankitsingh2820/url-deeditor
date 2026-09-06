@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -138,3 +139,47 @@ def test_detect_spans_finds_the_fixture_cuts(fixture_video: Path):
     assert spans[0][0] == 0.0
     for previous, current in zip(spans, spans[1:], strict=False):
         assert previous[1] == current[0]
+
+
+def test_frame_sink_survives_audio_shorter_than_the_video(tmp_path: Path):
+    """Regression: a source whose audio ends before its video must not kill the
+    encode.
+
+    With `-shortest`, ffmpeg exits the moment the audio stream ends and closes
+    stdin, so the writer takes a BrokenPipeError partway through and the whole
+    inpaint stage fails -- on a perfectly valid input. Mismatched stream
+    durations are common in real files.
+    """
+    import numpy as np
+
+    source = tmp_path / "short_audio.mp4"
+    subprocess.run(
+        ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+         "-f", "lavfi", "-i", "testsrc=size=64x64:rate=10:duration=3",
+         "-f", "lavfi", "-i", "sine=frequency=440:duration=1",   # 1s audio, 3s video
+         "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
+         "-c:a", "aac", str(source)],
+        check=True, capture_output=True,
+    )
+    assert ffmpeg.probe_media(source).duration == pytest.approx(3.0, abs=0.3)
+
+    out = tmp_path / "out.mp4"
+    sink = ffmpeg.FrameSink(out, width=64, height=64, fps=10.0, audio_from=source)
+    try:
+        for _ in range(30):                      # all 3 seconds of frames
+            sink.write(np.zeros((64, 64, 3), np.uint8))
+    finally:
+        sink.close()
+
+    # Every frame made it: the output is the video's length, not the audio's.
+    assert ffmpeg.probe_media(out).duration == pytest.approx(3.0, abs=0.3)
+
+
+def test_frame_sink_reports_the_encoder_reason_not_a_bare_pipe_error(tmp_path: Path):
+    sink = ffmpeg.FrameSink(tmp_path / "x.mp4", width=32, height=32, fps=10.0)
+    sink.close()
+    # Writing after close: the failure must name the file and carry ffmpeg's output.
+    import numpy as np
+
+    with pytest.raises((ffmpeg.FFmpegError, ValueError)):
+        sink.write(np.zeros((32, 32, 3), np.uint8))
